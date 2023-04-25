@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"encoding/hex"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -12,10 +15,16 @@ import (
 )
 
 func main() {
-	duration := flag.Duration("duration", 30*time.Second, "how long to capture output for")
 	device := flag.String("dev", "/dev/tty.usbserial-A105BLO7", "device to open")
 	baud := flag.Int("baud", 115200, "baud rate")
+	splitOnHex := flag.String("split-on", "2928", "bytes to split on, in hex")
 	flag.Parse()
+
+	splitOn, err := hex.DecodeString(*splitOnHex)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	mode := &serial.Mode{
 		BaudRate: *baud,
 	}
@@ -46,16 +55,31 @@ func main() {
 	mustRead(port, []byte{0x01})
 
 	go func() {
-		io.Copy(os.Stdout, port)
+		scan := bufio.NewScanner(port)
+		scan.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+			if atEOF && len(data) == 0 {
+				return 0, nil, nil
+			}
+			if i := bytes.Index(data, splitOn); i >= 0 {
+				return i + 1, data[0:i], nil
+			}
+
+			return 0, nil, nil
+		})
+		for scan.Scan() {
+			data := scan.Bytes()
+			fmt.Fprintf(os.Stdout, `{"t":%q,"v":%q}`+"\n", time.Now().Format(time.RFC3339Nano), hex.EncodeToString(data))
+		}
+
+		if err := scan.Err(); err != nil {
+			log.Fatalf("scanning: %v", err)
+		}
 	}()
 
 	time.Sleep(1000 * time.Millisecond)
 	writeByte(port, 0b00001111)
 
-	// mustRead(port, []byte("ART1"))
-
-	time.Sleep(*duration)
-	writeByte(port, 0x0)
+	select {}
 }
 
 func writeByte(port io.Writer, b byte) {
